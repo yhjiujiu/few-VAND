@@ -17,14 +17,14 @@ import torch.nn as nn
 #import open_clip.utils.misc as misc
 import open_clip
 from dataset import VisaDataset, MVTecDataset
-from model import linearlayer,linearlayer_att
+from model import Classifier
 from loss import FocalLoss, BinaryDiceLoss,BinaryFocalLoss
 from prompt_ensemble import encode_text_with_prompt_ensemble
 from clip_encoder import DualTokenTextEncoder
-from few_shot import memory,attention_single_query
+from few_shot import memory,attention
 
 
-## 利用score-map计算损失，以便后续计算指标
+
 def setup_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -89,6 +89,7 @@ def train(args):
     
     # datasets
     if args.dataset == 'mvtec':
+        ### 为什么这里的mode默认为test
         train_data = MVTecDataset(root=args.train_data_path, transform=preprocess, target_transform=transform,
                                   aug_rate=args.aug_rate)
     else:
@@ -97,11 +98,7 @@ def train(args):
     total_batches = len(train_dataloader)
     print(f"总批次数: {total_batches}")
 
-
-    # losses 
-    loss_focal = FocalLoss()
-    loss_dice = BinaryDiceLoss()
-
+    # text prompt  开启混合精度计算
     dual_encoder = DualTokenTextEncoder(device,
       clip_model=model,
       num_normal_tokens=5,      # 5个正常token
@@ -111,31 +108,24 @@ def train(args):
     model.to(device)
     with torch.amp.autocast(device_type='cuda'), torch.no_grad():
         
-        #text_prompts = encode_text_with_prompt_ensemble(model, obj_list, tokenizer, device)
         text_prompts = dual_encoder().to(device)
 
 
     # query token 可训练的 (正态分布初始化)
-    lenth = int(image_size*image_size/(model_configs['vision_cfg']['patch_size']*model_configs['vision_cfg']['patch_size']))
+    num_query_tokens = 1
     query_tokens = nn.Parameter(
-    torch.randn(lenth, model_configs['vision_cfg']['width']).to(device)
+    torch.randn(num_query_tokens, model_configs['embed_dim']).to(device)
     )
 
     # linear layer
-    # 对text embedding做转换，768-->1024,对齐image hidden的维度
-    trainable_layer = linearlayer(model_configs['embed_dim'],model_configs['vision_cfg']['width']).to(device)
-    trainable_layer_att = linearlayer_att(model_configs['vision_cfg']['width'],1).to(device)
-    
-    text_prompts = trainable_layer(text_prompts)
-    ## 这里的可训练参数为query token，prompt token + 特征映射函数
+    ## 对attention 进行线性变换，输出二分类结果
+    trainable_layer = Classifier(model_configs['embed_dim'],2).to(device)
+    ## 这里的可训练参数为query token，prompt token + 最后的分类器
     optimizer = torch.optim.Adam([
         {'params': trainable_layer.parameters()},
-        {'params': trainable_layer_att.parameters()},
         {'params': [query_tokens, dual_encoder.normal_tokens, dual_encoder.abnormal_tokens]},
-        
     ], lr=learning_rate, betas=(0.5, 0.999))
 
-#{'params': [query_tokens, dual_encoder.normal_tokens, dual_encoder.abnormal_tokens]}
     for epoch in range(epochs):
         loss_list = []
         idx = 0
@@ -146,64 +136,44 @@ def train(args):
             cls_name = items['cls_name']  # 一个batch中对应的cls name
             with torch.amp.autocast(device_type='cuda'):
                 with torch.no_grad():
-                    ##features_list 代表输出哪些层的特征,这里取最后一层
-                    image_features, patch_tokens_ = model.encode_image(image, features_list)
-                    patch_tokens = patch_tokens_[0][:,1:,:]
-                   # image_features： CLS的输出
-                    #print("image_features.size: {}".format(image_features.size())) #[b,d]
+                    image_features, patch_tokens = model.encode_image(image, features_list)
                     text_features = []
                     for cls in cls_name:
                        text_features.append(text_prompts) ## 每个batch均用相同的prompt
-                       #print("text_features1: {}".format(text_prompts.size())) # text_features: 
-                    text_features = torch.stack(text_features, dim=0).squeeze(1) ##
-                    text_features = text_features.transpose(1, 2)
-                    #print("text_features: {}".format(text_features.size())) # text_features: torch.Size([8, 2, 768])
+                    text_features = torch.stack(text_features, dim=0).squeeze(1)  ##[batch_size, 2,dim]
 
-                    #text_features = text_prompts.expand(batch_size, -1, -1)
-                    #print("text_features: {}".format(text_features.size())) # text_features: torch.Size([8, 2, 768])
                     # few shot 得到reference image的特征
-                    #if args.mode == 'few_shot':
                     mem_features = memory(args.model, model, cls_name, dataset_dir, save_path, preprocess, transform,
                                             args.k_shot, dataset_name, device)
-                    ## batch中的每一个cls_name对应的mem_features  然后根据img提取相应的特征
-                    ## refer_features: [batch_size,k-shot,len,hid_dim(1024)]
+                    ## refer_features: [batch_size,k-shot,emb_dim]
                     refer_features = []
                     for cls in cls_name:
                         refer_features.append(mem_features[cls])
-                    refer_features_ = torch.stack(refer_features,dim=0) ##[8,4,len,1024]
-                    refer_features_ = torch.mean(refer_features_,dim=1).squeeze(1)
-                    #print("refer_features: {}".format(refer_features_.size()))  ##[8,len,1024]
-                    ## 进行注意力计算
-                    attn_features = attention_single_query(query_tokens,refer_features_,patch_tokens[0])
-                    # attn_features: [b,lenth,1024]
-                attn_output = trainable_layer_att(attn_features).squeeze(2) 
-                # attn_output: [b,lenth] 
-                # pixel level 这里主要是训练每一层的linear 层
-                patch_tokens /= patch_tokens.norm(dim=-1, keepdim=True)
-                anomaly_map = (100.0 * patch_tokens @ text_features) 
-                # patch_tokens [8, 1369, 768] text_features:[8,768,2]
-                B, L, C = anomaly_map.shape
-                H = int(np.sqrt(L)) ## 
-                #print("H: {}".format(H)) 37 
-                #print("image_size: {}".format(image_size)) 518
-                anomaly_map = F.interpolate(anomaly_map.permute(0, 2, 1).view(B, 2, H, H),
-                                            size=image_size, mode='bilinear', align_corners=True)
+                    refer_features_ = torch.stack(refer_features,dim=0) ##[8,4,dim]
+                    ## refer_features: [batch_size,1,emb_dim]
+                    refer_features_ = torch.mean(refer_features_,dim=1) ##[8,dim]
+                    ## 交叉注意力计算
+                    attn_features = attention(query_tokens,refer_features_,image_features)
+                    # ## reference作为Key
 
-                anomaly_map_att = F.interpolate(attn_output.view(B, 1,H, H),
-                                            size=image_size, mode='bilinear', align_corners=True)
-                ##anomaly_map_att,直接转换成B*H*H的形式            
-                #print("anomaly_map: {}".format(anomaly_map.size())) [8, 2, 518, 518])
-                anomaly_map = torch.softmax(anomaly_map, dim=1)
-
-            # losses
-            gt = items['img_mask'].squeeze().to(device)
-            gt[gt > 0.5], gt[gt <= 0.5] = 1, 0 ## 大于0.5，为abnormal,被设置为1
             loss = 0
-            loss += loss_focal(anomaly_map, gt)
-            loss += loss_dice(anomaly_map[:, 1, :, :], gt) ## 第二维度 为abnormal的概率
-            loss += loss_dice(anomaly_map_att[:, 0, :, :], gt) ## 第二维度 为abnormal的概率
+            label = items["anomaly"] 
+            image_features = image_features/image_features.norm(dim=-1, keepdim=True)  ###[batch_size,dim]
+            text_features = text_features/text_features.norm(dim=-1, keepdim=True)  ###[batch_size,2,dim]
+            attn_features = attn_features/attn_features.norm(dim=-1, keepdim=True) ###[batch_size,dim]
 
-            ## attn_features: [b,lenth,1] 匹配输出，为1的概率
+            text_probs = image_features.unsqueeze(1) @ text_features.permute(0, 2, 1)
+            text_probs = text_probs[:, 0, ...]/0.07
+            
+            #print("text_probs: {}".format(text_probs.size())) #[8,1,2] normal的index为0，abnormal index为1
+            refer_probs = trainable_layer(attn_features)
+            image_loss = F.cross_entropy(text_probs.squeeze(), label.long().to(device))
+            reference_loss = F.cross_entropy(refer_probs, label.long().to(device))
+
+
+            loss = image_loss + reference_loss
+            print("image_loss:{} ; reference_loss: {}".format(image_loss,reference_loss))
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -216,8 +186,10 @@ def train(args):
         # save model
         if (epoch + 1) % args.save_freq == 0:
             ckp_path = os.path.join(save_path, 'epoch_' + str(epoch + 1) + '.pth')
-            torch.save({'trainable_linearlayer': trainable_layer.state_dict()}, ckp_path)
-
+            torch.save({'trainable_layer': trainable_layer.state_dict(),
+            'dual_encoder': dual_encoder.state_dict(),
+            'query_tokens': query_tokens.detach().cpu(),  # Save the parameter directly,
+            }, ckp_path)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("VAND Challenge", add_help=True)
@@ -245,3 +217,4 @@ if __name__ == '__main__':
 
     setup_seed(111)
     train(args)
+

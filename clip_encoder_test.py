@@ -45,16 +45,20 @@ class DualTokenTextEncoder(nn.Module):
         # 创建两组可学习token
         embed_dim = self.token_embedding.weight.shape[1]
         
+       
+
         self.normal_tokens = nn.Parameter(
             torch.empty(1, num_abnormal_tokens, embed_dim)
         )
-        nn.init.normal_(self.normal_tokens,std=0.02)
+        nn.init.normal_(self.normal_tokens,std=0.02).to(device)
 
         
         self.abnormal_tokens = nn.Parameter(
             torch.empty(1, num_abnormal_tokens, embed_dim)
         )
         nn.init.normal_(self.abnormal_tokens, std=0.02)
+        #print("self.abnormal_tokens: {}".format(self.abnormal_tokens))
+        
         # 位置编码适配器
         self.normal_pos_emb = self._get_positional_embedding(num_normal_tokens)
         self.abnormal_pos_emb = self._get_positional_embedding(num_abnormal_tokens)
@@ -68,7 +72,9 @@ class DualTokenTextEncoder(nn.Module):
         """处理单个token组的编码流程"""
         # 嵌入 + 位置编码
         #print("self.attn_mask: {}".format(self.attn_mask.size())) [5,5]
-        x = tokens + pos_emb
+        #print("tokens: {}".format(tokens.device))
+        #print("pos_emb: {}".format(pos_emb.device))
+        x = tokens.to(self.device) + pos_emb
         x = x.to(self.device)
         #print("x: {}".format(x.size())) ##[1,5,768]
         attn_mask = build_causal_attn_mask(x.size(1)).to(self.device)

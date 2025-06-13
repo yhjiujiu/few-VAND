@@ -7,7 +7,6 @@ def memory(model_name, model, obj_list, dataset_dir, save_path, preprocess,
 transform, k_shot,dataset_name, device):
     mem_features = {}
     ## obj_list 为测试集的cls name.
-    #print("obj_list: {}".format(obj_list[:3]))
     for obj in obj_list:
         if dataset_name == 'mvtec':
             data = MVTecDataset(root=dataset_dir, transform=preprocess, target_transform=transform,
@@ -25,13 +24,9 @@ transform, k_shot,dataset_name, device):
                     patch_tokens = patch_token_[0][0, 1:, :] ##取除cls的其他所有token得编码
                 else: 
                     pass
-                #print("patch_tokens: {}".format(patch_tokens.size()))
-                features.append(patch_tokens) # [len,dim]
+                features.append(image_features) # [batch,dim]
 
-                #image_features = model.encode_image(image) ## 图片整体特征
-            #features.append(image_features)
-        img_features = torch.stack(features, dim=0) #[4,len,dim]
-        #print("img_features: {}".format(img_features.size())) #img_features: torch.Size([4,  768])
+        img_features = torch.stack(features, dim=0).squeeze(1) #[4,dim]
         mem_features[obj]= img_features ## 每个对象下的reference image 编码
 
     return mem_features
@@ -44,13 +39,9 @@ def attention_single_query(Q, K, V):
     对每个 batch 的 K/V 进行 attention。
 
     参数:
-        Q: [len, d1]，如 [1039, d1]，单个查询序列（reference）
-        K: [batch_size, seq_len, d1]
-        V: [batch_size, seq_len, d1]
-Q: torch.Size([1, 1369, 1024]), K: torch.Size([8, 1369, 1024]), V: torch.Size([1369, 1024])
-
-    返回:
-        context: [batch_size, seq_len, d1]，与 V 相同形状
+        Q: [1, d1], 
+        K: [batch_size, d1]
+        V: [batch_size, d1]
     """
     # Q: [seq_len, d1] -> [1, seq_len, d1]（为了 broadcast）
     Q = Q.unsqueeze(0)  # [1, seq_len, d1]
@@ -70,3 +61,24 @@ Q: torch.Size([1, 1369, 1024]), K: torch.Size([8, 1369, 1024]), V: torch.Size([1
     context = torch.matmul(attn_weights, V)  # [batch_size, seq_len, d1]
 
     return context
+
+def attention(Q, K, V):
+    """
+    计算注意力输出
+    :param Q: 查询矩阵，维度为 (1, d1)
+    :param K: 键矩阵，维度为 (batch_size, d1)
+    :param V: 值矩阵，维度为 (batch_size, d1)
+    :return: 注意力输出，维度为 (batch_size, d1)
+    """
+    batch_size = K.size(0)
+    
+    # 重复 Q，维度为 (batch_size, d1)
+    Q_repeated = Q.repeat(batch_size, 1)
+    
+    # 计算注意力权重
+    attention_weights = F.softmax(torch.matmul(Q_repeated, K.T) / (K.size(1) ** 0.5), dim=-1)
+    
+    # 计算注意力输出
+    attention_output = torch.matmul(attention_weights, V)
+    
+    return attention_output
