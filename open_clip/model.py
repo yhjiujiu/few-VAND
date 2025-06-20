@@ -203,7 +203,10 @@ class CLIP(nn.Module):
     def lock_image_tower(self, unlocked_groups=0, freeze_bn_stats=False):
         # lock image tower as per LiT - https://arxiv.org/abs/2111.07991
         self.visual.lock(unlocked_groups=unlocked_groups, freeze_bn_stats=freeze_bn_stats)
-
+    @property
+    def dtype(self):
+        return self.visual.conv1.weight.dtype
+    
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
         self.visual.set_grad_checkpointing(enable)
@@ -226,7 +229,30 @@ class CLIP(nn.Module):
         # take features from the eot embedding (eot_token is the highest number in each sequence)
         x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
         return F.normalize(x, dim=-1) if normalize else x
+    
+    def encode_text_learn(self, prompts, tokenized_prompts, deep_compound_prompts_text = None, normalize: bool = False):
+        cast_dtype = self.transformer.get_cast_dtype()
 
+        # x = self.token_embedding(text).to(cast_dtype)  # [batch_size, n_ctx, d_model]
+        
+        # x = x + self.positional_embedding.to(cast_dtype)
+
+        x = prompts + self.positional_embedding.to(cast_dtype)
+        x = x.permute(1, 0, 2)  # NLD -> LND [77, 2, 768]
+        # print("test", x.shape, len(deep_compound_prompts_text))
+        
+        if deep_compound_prompts_text is None:
+            x = self.transformer(x) #  return [x, x], out_tokens
+            x = x[0] # [77, 2, 768]
+        else:
+            x = self.transformer([x, deep_compound_prompts_text, 0])
+        
+        x = x.permute(1, 0, 2)  # LND -> NLD
+        x = self.ln_final(x).type(self.dtype)  # [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
+        return x
+    
     def forward(self, image, text):
         image_features = self.encode_image(image, normalize=True)
         text_features = self.encode_text(text, normalize=True)
