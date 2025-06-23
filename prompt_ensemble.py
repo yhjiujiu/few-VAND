@@ -112,99 +112,35 @@ class FewVand_PromptLearner(nn.Module):
     ) 
         self.image_proj = nn.Linear(self.width,self.emb_dim).to(device)
         self.classfier = nn.Linear(self.width,2).to(device)
-        if ctx_init_pos and ctx_init_neg:
-            # use given words to initialize context vectors
-            ctx_init_pos = ctx_init_pos.replace("_", " ")
-            ctx_init_neg = ctx_init_neg.replace("_", " ")
-            n_ctx_pos = len(ctx_init_pos.split(" "))
-            n_ctx_neg = len(ctx_init_neg.split(" "))
-            # 初始化text成bpd编码
-            prompt_pos = tokenize(ctx_init_pos)
-            prompt_neg = tokenize(ctx_init_neg)
-            with torch.no_grad():
-                # 生成相应的text embedding
-                embedding_pos = clip_model.token_embedding(prompt_pos).type(dtype)
-                embedding_neg = clip_model.token_embedding(prompt_neg).type(dtype)
-            # 这些是去除出来EOS 和 # CLS, EOS， 获得可学习的textual prompt
-            ctx_vectors_pos = embedding_pos[0, 1: 1 + n_ctx_pos, :]
-            ctx_vectors_neg = embedding_neg[0, 1: 1 + n_ctx_neg, :]
-            prompt_prefix_pos = ctx_init_pos
-            prompt_prefix_neg = ctx_init_neg
-            if True:
-                ctx_vectors_pos_ = []
-                ctx_vectors_neg_ = []
-                for _ in range(self.n_cls):
-                    ctx_vectors_pos_.append(deepcopy(ctx_vectors_pos))
-                    ctx_vectors_neg_.append(deepcopy(ctx_vectors_neg))
-                ctx_vectors_pos = torch.stack(ctx_vectors_pos_, dim=0)
-                ctx_vectors_neg = torch.stack(ctx_vectors_neg_, dim=0)
 
-        else:
-            # Random Initialization
-            if True:
-                print("Initializing class-specific contexts")
-                # 这里是cls是类的个数，n_ctx_pos代表learnable token的长度，ctx_dim表示prompt的dimension
-                ctx_vectors_pos = torch.empty(1, self.normal_num, n_ctx_pos, ctx_dim, dtype=dtype)
-                ctx_vectors_neg = torch.empty(1, self.anormaly_num, n_ctx_neg, ctx_dim, dtype=dtype)
-
-            else:
-                print("Initializing a generic context")
-                ctx_vectors_pos = torch.empty(n_ctx_pos, ctx_dim, dtype=dtype)
-                ctx_vectors_neg = torch.empty(n_ctx_neg, ctx_dim, dtype=dtype)
-
-            nn.init.normal_(ctx_vectors_pos, std=0.02)
-            nn.init.normal_(ctx_vectors_neg, std=0.02)
-            prompt_prefix_pos = " ".join(["A"] * n_ctx_pos)
-            prompt_prefix_neg = " ".join(["N"] * n_ctx_neg)
+        ctx_vectors_pos = torch.empty(n_ctx_pos, ctx_dim, dtype=dtype)
+        ctx_vectors_neg = torch.empty(n_ctx_neg, ctx_dim, dtype=dtype)
+        nn.init.normal_(ctx_vectors_pos, std=0.02)
+        nn.init.normal_(ctx_vectors_neg, std=0.02)
+        prompts_pos = " ".join(["A"] * n_ctx_pos)+"."
+        prompts_neg = " ".join(["N"] * n_ctx_neg)+'.'
 
         self.ctx_pos = nn.Parameter(ctx_vectors_pos).to(device)  # to be optimized
         self.ctx_neg = nn.Parameter(ctx_vectors_neg).to(device)  # to be optimized
 
-        classnames = [name.replace("_", " ") for name in classnames]
-        # name_lens = [len(tokenizer.encode(name)) for name in classnames]
+        tokenized_prompts_pos = tokenize(prompts_pos).to(device)
+        tokenized_prompts_neg = tokenize(prompts_neg).to(device)
 
-        prompts_pos = [prompt_prefix_pos + " " + template.format(name) + "." for template in self.state_normal_list for
-                       name in classnames]
-        prompts_neg = [prompt_prefix_neg + " " + template.format(name) + "." for template in self.state_anomaly_list for
-                       name in classnames]
-
-        tokenized_prompts_pos = []
-        tokenized_prompts_neg = []
-
-        for p_pos in prompts_pos:
-            tokenized_prompts_pos.append(tokenize(p_pos))
-        for p_neg in prompts_neg:
-            tokenized_prompts_neg.append(tokenize(p_neg))
-        tokenized_prompts_pos = torch.cat(tokenized_prompts_pos).to(device)
-        tokenized_prompts_neg = torch.cat(tokenized_prompts_neg).to(device)
         # 生成相应的text embedding
         with torch.no_grad():
-
             embedding_pos = clip_model.token_embedding(tokenized_prompts_pos).type(dtype)
             embedding_neg = clip_model.token_embedding(tokenized_prompts_neg).type(dtype)
-            n, l, d = embedding_pos.shape
-            #print("embedding_pos", embedding_pos.shape) #torch.Size([1, 77, 768])
-            embedding_pos = embedding_pos.reshape(normal_num, self.n_cls, l, d).permute(1, 0, 2, 3)
-            embedding_neg = embedding_neg.reshape(anormaly_num, self.n_cls, l, d).permute(1, 0, 2, 3)
+            print("embedding_pos", embedding_pos.shape) #torch.Size([1, 77, 768])
 
-        self.register_buffer("token_prefix_pos", embedding_pos[:, :, :1, :])
-        self.register_buffer("token_suffix_pos", embedding_pos[:, :, 1 + n_ctx_pos:, :])
-        self.register_buffer("token_prefix_neg", embedding_neg[:, :, :1, :])
-        self.register_buffer("token_suffix_neg", embedding_neg[:, :, 1 + n_ctx_neg:, :])
-
-        n, d = tokenized_prompts_pos.shape
-        tokenized_prompts_pos = tokenized_prompts_pos.reshape(normal_num, self.n_cls, d).permute(1, 0, 2)
-
-        n, d = tokenized_prompts_neg.shape
-        tokenized_prompts_neg = tokenized_prompts_neg.reshape(anormaly_num, self.n_cls, d).permute(1, 0, 2)
-
-        self.n_ctx_pos = n_ctx_pos
-        self.n_ctx_neg = n_ctx_neg
-        # tokenized_prompts = torch.cat([tokenized_prompts_pos, tokenized_prompts_neg], dim=0)  # torch.Tensor
+        self.register_buffer("token_prefix_pos", embedding_pos[:,:1, :])
+        self.register_buffer("token_suffix_pos", embedding_pos[:,1 + n_ctx_pos:, :])
+        self.register_buffer("token_prefix_neg", embedding_neg[:,:1, :])
+        self.register_buffer("token_suffix_neg", embedding_neg[:,1 + n_ctx_neg:, :])
+  
         self.register_buffer("tokenized_prompts_pos", tokenized_prompts_pos)
         self.register_buffer("tokenized_prompts_neg", tokenized_prompts_neg)
         print("tokenized_prompts shape", self.tokenized_prompts_pos.shape, self.tokenized_prompts_neg.shape)
-        #[1, 1, 77],[1, 1, 77]
+        #[1,77]
     def forward(self, cls_id=None):
         ctx_pos = self.ctx_pos
         ctx_neg = self.ctx_neg
@@ -214,34 +150,38 @@ class FewVand_PromptLearner(nn.Module):
         suffix_pos = self.token_suffix_pos
         suffix_neg = self.token_suffix_neg
 
-        ctx_pos = ctx_pos.expand(self.n_cls, -1, -1, -1)
-        ctx_neg = ctx_neg.expand(self.n_cls, -1, -1, -1)
+        print("prefix_pos:",prefix_pos.size(),ctx_pos.size(),suffix_pos.size())
+#prefix_pos: torch.Size([1, 1, 768])
+#  torch.Size([12, 768]) 
+# torch.Size([1, 64, 768])
 
         prompts_pos = torch.cat(
             [
                 # N(the number of template), 1, dim
-                prefix_pos,  # (n_cls, 1, dim)
-                ctx_pos,  # (n_cls, n_ctx, dim)
-                suffix_pos,  # (n_cls, *, dim)
+                prefix_pos.squeeze(0),  # ( 1, dim)
+                ctx_pos,  # (n_ctx, dim)
+                suffix_pos.squeeze(0),  # (n_cls, *, dim)
             ],
-            dim=2,
+            dim=0,
         )
 
         prompts_neg = torch.cat(
             [
-                prefix_neg,  # (n_cls, 1, dim)
-                ctx_neg,  # (n_cls, n_ctx, dim)
-                suffix_neg,  # (n_cls, *, dim)
+                prefix_neg.squeeze(0),  
+                ctx_neg, 
+                suffix_neg.squeeze(0),  
             ],
-            dim=2,
+            dim=0,
         )
+        prompts = torch.stack((prompts_neg, prompts_pos), dim=0) #[2,77,768]
+        print("prompts:",prompts.size())
 
-        prompts = torch.cat([prompts_neg,prompts_pos], dim=1)
+        tokenized_prompts = torch.stack((self.tokenized_prompts_neg, self.tokenized_prompts_pos), dim=0) #[2,77]
 
-        tokenized_prompts = torch.cat((self.tokenized_prompts_neg,self.tokenized_prompts_pos), dim=1)
+        print("tokenized_prompts:",tokenized_prompts.size())
 
-        prompt = prompts[cls_id, :]
-        tokenized_prompt = tokenized_prompts[cls_id, :]
+        prompt = prompts
+        tokenized_prompt = tokenized_prompts.squeeze(1)
 
         
         return prompt, tokenized_prompt
