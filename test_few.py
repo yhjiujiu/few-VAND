@@ -16,11 +16,11 @@ from tqdm import tqdm
 
 import open_clip
 from few_shot import memory,attention
-from model import Classifier
+from model import Classifier,linearlayer
 from dataset import VisaDataset, MVTecDataset
-from prompt_ensemble import encode_text_with_prompt_ensemble
-from clip_encoder_test import DualTokenTextEncoder
 from metric import image_level_metrics
+from prompt_ensemble import FewVand_PromptLearner,encode_text_with_prompt_ensemble2
+from few_shot import memory_pixel,attention,patch_attention
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -76,10 +76,11 @@ def test(args):
     dataset_dir = args.data_path
     save_path = args.save_path
     dataset_name = args.dataset
+    n_ctx = args.n_ctx
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    txt_path = os.path.join(save_path, 'log_test_few_map.txt')
+    txt_path = os.path.join(save_path, 'log_test_pixel_global.txt')
 
     # clip
     model, _, preprocess = open_clip.create_model_and_transforms(args.model, img_size, pretrained=args.pretrained)
@@ -107,13 +108,10 @@ def test(args):
             continue
         logger.info(f'{arg}: {getattr(args, arg)}')
 
-    dual_encoder = DualTokenTextEncoder(device,
-      clip_model=model,
-      num_normal_tokens=5,      # 5个正常token
-      num_abnormal_tokens=5,    # 5个异常token
-      freeze_base=True)
-
-
+    
+    # text prompt  
+    with torch.cuda.amp.autocast(), torch.no_grad():
+        prompt_learner = FewVand_PromptLearner(model.to(device),n_ctx,device)
     model.to(device)
 
     # seg
@@ -121,13 +119,18 @@ def test(args):
         model_configs = json.load(f)
 
     trainable_layer = Classifier(model_configs['embed_dim'],2).to(device)
+    img_projection = linearlayer(model_configs["vision_cfg"]['width'], model_configs['embed_dim']).to(device)
+
     ## 参数加载
     checkpoint = torch.load(args.checkpoint_path)
-    dual_encoder.load_state_dict(checkpoint["dual_encoder"])
+    prompt_learner.load_state_dict(checkpoint["prompt_learner"])
     query_tokens=checkpoint["query_tokens"].to(device)
     trainable_layer.load_state_dict(checkpoint["trainable_layer"])
+    img_projection.load_state_dict(checkpoint["img_projection"])
+    text_features = encode_text_with_prompt_ensemble2(model,prompt_learner)
+
     
-    print("query_tokens: {}".format(query_tokens.size()))
+    print("query_tokens: {}".format(query_tokens[0]))
     # dataset
     transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
@@ -146,7 +149,7 @@ def test(args):
     # few shot
     ## get k-shot features of all cls names.
     if args.mode == 'few_shot':    
-        mem_features = memory(args.model, model, obj_list, dataset_dir, save_path, preprocess, transform,
+        mem_features = memory_pixel(args.model, model, obj_list, dataset_dir, save_path, preprocess, transform,
                                             args.k_shot, dataset_name, device)
     results = {}
     metrics = {}
@@ -157,8 +160,7 @@ def test(args):
         metrics[obj] = {}
         metrics[obj]['image-auroc'] = 0
         metrics[obj]['image-ap'] = 0
-    with torch.amp.autocast(device_type=device), torch.no_grad():
-        text_features = dual_encoder() # [1, 2, dim]
+
     text_features = text_features/text_features.norm(dim=-1, keepdim=True)
     for idx, items in enumerate(tqdm(test_dataloader)):
         image = items['img'].to(device)
@@ -167,17 +169,18 @@ def test(args):
         with torch.no_grad():
             image_features, _ = model.encode_image(image, [24])
             image_features = image_features / image_features.norm(dim=-1, keepdim=True) #[1, dim]
+            ## text-image image_level score
+            text_probs = image_features @ text_features/0.07    
+            text_probs = text_probs.squeeze(1).softmax(-1)[:, 1] ####取为abnormal的概率
 
-            text_probs = image_features.unsqueeze(1).float() @ text_features.permute(0, 2, 1).float()
-            ## refer-score
+            ## refer-score image-level
             refer_feature= mem_features[cls_name[0]] #[k-shot, dim]
             refer_feature_ = torch.mean(refer_feature,dim=0,keepdim=True)  #[1,dim]
-            attn_features = attention(query_tokens,refer_feature_,image_features)
+            attn_features = patch_attention(query_tokens,refer_feature_,image_features)
             refer_score = trainable_layer(attn_features)
 
-            f_probs = text_probs.squeeze(1) + refer_score
-            f_probs = f_probs.softmax(-1)
-            f_probs = f_probs[:, 1] ####取为abnormal的概率
+            refer_probs = refer_score[:, 1]
+            f_probs = (text_probs + refer_probs)/2. ####取为abnormal的概率
 
             results[cls_name[0]]['pr_sp'].extend(f_probs.detach().cpu())
 
@@ -221,6 +224,7 @@ if __name__ == '__main__':
     parser.add_argument("--metrics", type=str, default='image-level')
     parser.add_argument("--k_shot", type=int, default=10, help="e.g., 10-shot, 5-shot, 1-shot")
     parser.add_argument("--seed", type=int, default=10, help="random seed")
+    parser.add_argument("--n_ctx", type=int, default=12, help="e.g., 5,10,20")
     args = parser.parse_args()
 
     setup_seed(args.seed)

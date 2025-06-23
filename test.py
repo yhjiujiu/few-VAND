@@ -165,7 +165,7 @@ def test(args):
 
             # sample
             text_probs = (100.0 * image_features @ text_features[0]).softmax(dim=-1)
-            results['pr_sp'].append(text_probs[0][1].cpu().item())
+            results['pr_sp'].append(text_probs[0][1].cpu().item())  #预测为anomly的概率
 
             # pixel
             patch_tokens = linearlayer(patch_tokens)

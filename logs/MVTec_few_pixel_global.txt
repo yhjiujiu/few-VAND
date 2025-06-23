@@ -1,0 +1,60 @@
+25-06-23 17:31:59.925 - INFO: data_path: /home/yinhong/VAD/VAND-few_local/data/mvtec
+25-06-23 17:31:59.925 - INFO: train_data_path: /home/yinhong/VAD/VAND-few_local/data/mvtec
+25-06-23 17:31:59.925 - INFO: save_path: ./exps/visa_pixel_global/vit_large_14_518
+25-06-23 17:31:59.925 - INFO: config_path: ./open_clip/model_configs/ViT-L-14-336.json
+25-06-23 17:31:59.925 - INFO: dataset: mvtec
+25-06-23 17:31:59.925 - INFO: model: ViT-L-14-336
+25-06-23 17:31:59.925 - INFO: pretrained: openai
+25-06-23 17:31:59.925 - INFO: features_list: [24]
+25-06-23 17:31:59.925 - INFO: epoch: 3
+25-06-23 17:31:59.926 - INFO: learning_rate: 0.001
+25-06-23 17:31:59.926 - INFO: batch_size: 8
+25-06-23 17:31:59.926 - INFO: image_size: 518
+25-06-23 17:31:59.926 - INFO: aug_rate: 0.2
+25-06-23 17:31:59.926 - INFO: print_freq: 1
+25-06-23 17:31:59.926 - INFO: save_freq: 1
+25-06-23 17:31:59.926 - INFO: k_shot: 4
+25-06-23 17:31:59.926 - INFO: n_ctx: 12
+device: cuda
+model: ['T_destination', '__annotations__', '__call__', '__class__', '__delattr__', '__dict__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattr__', '__getattribute__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__', '__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__setstate__', '__sizeof__', '__str__', '__subclasshook__', '__weakref__', '_apply', '_backward_hooks', '_backward_pre_hooks', '_buffers', '_call_impl', '_forward_hooks', '_forward_hooks_with_kwargs', '_forward_pre_hooks', '_forward_pre_hooks_with_kwargs', '_get_backward_hooks', '_get_backward_pre_hooks', '_get_name', '_is_full_backward_hook', '_load_from_state_dict', '_load_state_dict_post_hooks', '_load_state_dict_pre_hooks', '_maybe_warn_non_full_backward_hook', '_modules', '_named_members', '_non_persistent_buffers_set', '_parameters', '_register_load_state_dict_pre_hook', '_register_state_dict_hook', '_replicate_for_data_parallel', '_save_to_state_dict', '_slow_forward', '_state_dict_hooks', '_state_dict_pre_hooks', '_version', 'add_module', 'apply', 'attn_mask', 'bfloat16', 'buffers', 'call_super_init', 'children', 'cpu', 'cuda', 'double', 'dtype', 'dump_patches', 'encode_image', 'encode_text', 'encode_text_learn', 'eval', 'extra_repr', 'float', 'forward', 'get_buffer', 'get_extra_state', 'get_parameter', 'get_submodule', 'half', 'ipu', 'ln_final', 'load_state_dict', 'lock_image_tower', 'logit_scale', 'modules', 'named_buffers', 'named_children', 'named_modules', 'named_parameters', 'output_dict', 'parameters', 'positional_embedding', 'register_backward_hook', 'register_buffer', 'register_forward_hook', 'register_forward_pre_hook', 'register_full_backward_hook', 'register_full_backward_pre_hook', 'register_load_state_dict_post_hook', 'register_module', 'register_parameter', 'register_state_dict_pre_hook', 'requires_grad_', 'set_extra_state', 'set_grad_checkpointing', 'share_memory', 'state_dict', 'text_projection', 'to', 'to_empty', 'token_embedding', 'train', 'training', 'transformer', 'type', 'visual', 'vocab_size', 'xpu', 'zero_grad']
+总批次数: 216
+Initializing class-specific contexts
+tokenized_prompts shape torch.Size([1, 1, 77]) torch.Size([1, 1, 77])
+prompt torch.Size([2, 77, 768]) torch.Size([2, 77])
+Parameter Name: query_token, Parameter Value: torch.Size([1369, 1024])
+Parameter Name: image_proj.weight, Parameter Value: torch.Size([768, 1024])
+Parameter Name: image_proj.bias, Parameter Value: torch.Size([768])
+Parameter Name: classfier.weight, Parameter Value: torch.Size([2, 1024])
+Parameter Name: classfier.bias, Parameter Value: torch.Size([2])
+initial_text_prompt: torch.Size([768, 2])
+patch_features:  1 torch.Size([8, 1370, 1024])
+q,k,v:  torch.Size([1369, 1024]) torch.Size([8, 1369, 1024]) torch.Size([8, 1369, 1024])
+image_features dtype: torch.float32
+text_features dtype: torch.float32
+text_probs shape: torch.Size([8, 2])
+squeezed text_probs shape: torch.Size([8, 2])
+label shape: torch.Size([8])
+image_loss:2.123046875 ; reference_loss: 0.701171875
+patch_features:  1 torch.Size([8, 1370, 1024])
+q,k,v:  torch.Size([1369, 1024]) torch.Size([8, 1369, 1024]) torch.Size([8, 1369, 1024])
+image_features dtype: torch.float32
+text_features dtype: torch.float32
+text_probs shape: torch.Size([8, 2])
+squeezed text_probs shape: torch.Size([8, 2])
+label shape: torch.Size([8])
+image_loss:3.208984375 ; reference_loss: 0.6875
+Traceback (most recent call last):
+  File "/home/yinhong/few-VAND/train_few.py", line 254, in <module>
+    train(args)
+  File "/home/yinhong/few-VAND/train_few.py", line 215, in train
+    (loss+image_loss+reference_loss).backward()
+  File "/home/yinhong/.conda/envs/VAND/lib/python3.9/site-packages/torch/_tensor.py", line 487, in backward
+    torch.autograd.backward(
+  File "/home/yinhong/.conda/envs/VAND/lib/python3.9/site-packages/torch/autograd/__init__.py", line 200, in backward
+    Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+RuntimeError: Trying to backward through the graph a second time (or directly 
+access saved tensors after they have already been freed). 
+Saved intermediate values of the graph are freed when you call .backward() 
+or autograd.grad(). Specify retain_graph=True if you need to backward
+ through the graph a second time or if you need to access saved tensors
+  after calling backward.

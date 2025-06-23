@@ -42,7 +42,7 @@ class Classifier(nn.Module):
 
 class linearlayer(nn.Module):
     def __init__(self, dim_in, dim_out):
-        # 对text prompt 进行线性变换 --768-->1024
+        # 对text prompt 进行线性变换 --1024-->768
         super(linearlayer, self).__init__()
         
         self.fc =nn.Linear(dim_in,dim_out)

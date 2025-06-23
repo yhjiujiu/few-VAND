@@ -76,7 +76,7 @@ def _get_clones(module, N):
 # "pipe_fryum",
 
 class FewVand_PromptLearner(nn.Module):
-    def __init__(self, clip_model, n_ctx, device):
+    def __init__(self, clip_model, n_ctx, device,Pparameters):
         super().__init__()
         classnames = ["obj"]
         self.n_cls = len(classnames) ## 所有类别均采用相同的text prompt
@@ -104,7 +104,14 @@ class FewVand_PromptLearner(nn.Module):
         anormaly_num = len(self.state_anomaly_list)
         self.normal_num = normal_num
         self.anormaly_num = anormaly_num
-
+        self.num_query_tokens = Pparameters['num_query_tokens']
+        self.width = Pparameters["width"]
+        self.emb_dim = Pparameters["emb_dim"]
+        self.query_token =  nn.Parameter(
+    torch.randn(self.num_query_tokens, self.width).to(device)
+    ) 
+        self.image_proj = nn.Linear(self.width,self.emb_dim).to(device)
+        self.classfier = nn.Linear(self.width,2).to(device)
         if ctx_init_pos and ctx_init_neg:
             # use given words to initialize context vectors
             ctx_init_pos = ctx_init_pos.replace("_", " ")
@@ -229,15 +236,17 @@ class FewVand_PromptLearner(nn.Module):
             dim=2,
         )
 
-        prompts = torch.cat([prompts_pos, prompts_neg], dim=1)
+        prompts = torch.cat([prompts_neg,prompts_pos], dim=1)
 
-        tokenized_prompts = torch.cat((self.tokenized_prompts_pos, self.tokenized_prompts_neg), dim=1)
+        tokenized_prompts = torch.cat((self.tokenized_prompts_neg,self.tokenized_prompts_pos), dim=1)
 
         prompt = prompts[cls_id, :]
         tokenized_prompt = tokenized_prompts[cls_id, :]
 
+        
         return prompt, tokenized_prompt
 
+    
 def encode_text_with_prompt_ensemble2(model, prompt_learner,objs=["objs"]):
     text_prompts = {}
     for idx, obj in enumerate(objs):
