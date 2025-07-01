@@ -180,7 +180,7 @@ def test(args):
             attn_features = attn_features/attn_features.norm(dim=-1, keepdim=True) ###[batch_size,dim]
             refer_score = prompt_learner.classfier(attn_features)
             print("attn_features: {}".format(attn_features.size()))
-            refer_probs = refer_score.softmax(-1)[:, 0]
+            refer_probs = refer_score.softmax(-1)[:, 1]
             f_probs = (text_probs + refer_probs)/2. ####取为abnormal的概率
 
             results[cls_name[0]]['pr_sp'].extend(f_probs.detach().cpu())
