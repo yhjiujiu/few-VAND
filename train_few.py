@@ -5,6 +5,8 @@ import random
 import os
 import json
 import argparse
+import wandb
+
 from torch.utils.data import DataLoader
 from datetime import datetime
 from torch.nn import functional as F
@@ -18,12 +20,18 @@ from loss import FocalLoss, BinaryDiceLoss
 #import open_clip.utils.misc as misc
 import open_clip
 from dataset import VisaDataset, MVTecDataset
-from model import Classifier,linearlayer
 from loss import FocalLoss, BinaryDiceLoss
-from prompt_ensemble import FewVand_PromptLearner,encode_text_with_prompt_ensemble2
-from few_shot import memory_pixel,attention,patch_attention
+from prompt_ensemble import FewVand_PromptLearner
+from few_shot import memory_pixel,patch_attention
 
 
+
+# 初始化项目
+#wandb.init(project="few-VAND-loss")
+
+from torch.utils.tensorboard import SummaryWriter
+
+writer = SummaryWriter(log_dir='./runs')  # 创建日志目录
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -109,12 +117,14 @@ def train(args):
     # learnable prompt  
     with torch.cuda.amp.autocast():
         prompt_learner = FewVand_PromptLearner(model.to(device),n_ctx,device,Ppra)
-        text_features = encode_text_with_prompt_ensemble2(model,prompt_learner)
+    
+    prompt, tokenized_prompt = prompt_learner()
 
+    #print("text_features: {}".format(text_features.size())) # [768, 2]
     model.to(device)
     prompt_learner.to(device)
 
-
+    #print("prompt_learner:",prompt_learner.ctx_neg)
     # query token 可训练的 (正态分布初始化)
     #num_query_tokens = 1
     # query_tokens = nn.Parameter(
@@ -130,8 +140,11 @@ def train(args):
     ## 这里的可训练参数为query token，prompt token + 最后的分类器
     optimizer = torch.optim.Adam(list(prompt_learner.parameters()), lr=learning_rate, betas=(0.5, 0.999))
 
+    model.eval()
+    prompt_learner.train()
     # 打印可训练的参数
     for name, param in prompt_learner.named_parameters():
+        #print(name)
         if param.requires_grad:  # 仅打印可训练的参数
             print(f"Parameter Name: {name}, Parameter Value: {param.data.size()}")
 
@@ -141,14 +154,17 @@ def train(args):
 
     # 所有类别均共享相同的normal和abnormal prompt
     #torch.autograd.set_detect_anomaly(True)  # 启用异常检测
-    print("initial_text_prompt: {}".format(text_features.size()))  # [768, 2]
+    
     for epoch in range(epochs):
         loss_list = []
-        
+        idxs = 0
         for items in train_dataloader:
+            idxs +=1
             image = items['img'].to(device)
             cls_name = items['cls_name']  # 一个batch中对应的cls name
             with torch.amp.autocast(device_type="cuda"):
+                text_features = model.encode_text_learn(prompt, tokenized_prompt)
+                text_features = text_features.permute(1, 0) # # [768, 2]
                 with torch.no_grad():
                     ## 取最后一层的patch embedding
                     image_features, patch_features = model.encode_image(image, features_list)
@@ -186,17 +202,17 @@ def train(args):
                 refer_probs =  prompt_learner.classfier(attn_features)
 
                 anomaly_maps = []
-                for idx in range(len(patch_features)):
+                #for idx in range(len(patch_features)):
                     #print(patch_features[idx].size()) # [8, 1369, 1024]
-                    normalized_patch = patch_features[idx] / patch_features[idx].norm(dim=-1, keepdim=True)
-                    patch_feature = prompt_learner.image_proj(normalized_patch) 
-                    anomaly_map = (100.0 * patch_feature @ text_features)
-                    B, L, C = anomaly_map.shape
-                    H = int(np.sqrt(L))
-                    anomaly_map = F.interpolate(anomaly_map.permute(0, 2, 1).view(B, 2, H, H),
-                                                size=image_size, mode='bilinear', align_corners=True)
-                    anomaly_map = torch.softmax(anomaly_map, dim=1)
-                    anomaly_maps.append(anomaly_map)
+                normalized_patch = patch_features[0] / patch_features[0].norm(dim=-1, keepdim=True)
+                patch_feature = prompt_learner.image_proj(normalized_patch) 
+                anomaly_map = (100.0 * patch_feature @ text_features)
+                B, L, C = anomaly_map.shape
+                H = int(np.sqrt(L))
+                anomaly_map = F.interpolate(anomaly_map.permute(0, 2, 1).view(B, 2, H, H),
+                                            size=image_size, mode='bilinear', align_corners=True)
+                anomaly_map = torch.softmax(anomaly_map, dim=1)
+                anomaly_maps.append(anomaly_map)
 
             image_loss = F.cross_entropy(text_probs, label.to(device))
             reference_loss = F.cross_entropy(refer_probs, label.to(device))
@@ -215,7 +231,13 @@ def train(args):
             (loss+image_loss+reference_loss).backward()
             optimizer.step()
             loss_list.append(loss.item())
-
+            # if idxs % 100 == 0:
+            #     wandb.log({"map_loss": loss.item(), "image_loss": image_loss.item(),"reference_loss": reference_loss.item()}, step=epoch * len(train_dataloader) + idxs)
+            if idxs % 100 == 0:
+                writer.add_scalar('map_loss', loss, epoch * len(train_dataloader) + idxs)  # 记录损失
+                writer.add_scalar('image_loss', image_loss, epoch * len(train_dataloader) + idxs)  # 记录损失
+                writer.add_scalar('reference_loss', reference_loss, epoch * len(train_dataloader) + idxs)  # 记录损失
+                writer.flush()
         # logs
         if (epoch + 1) % args.print_freq == 0:
             logger.info('epoch [{}/{}], loss:{:.4f}'.format(epoch + 1, epochs, np.mean(loss_list)))

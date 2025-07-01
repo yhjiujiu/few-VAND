@@ -78,32 +78,12 @@ def _get_clones(module, N):
 class FewVand_PromptLearner(nn.Module):
     def __init__(self, clip_model, n_ctx, device,Pparameters):
         super().__init__()
-        classnames = ["obj"]
-        self.n_cls = len(classnames) ## 所有类别均采用相同的text prompt
+
         self.n_ctx = n_ctx
         n_ctx_pos = self.n_ctx
         n_ctx_neg = self.n_ctx
-        # self.text_encoder_n_ctx = design_details["learnabel_text_embedding_length"]
-        ctx_init_pos = ""
-        ctx_init_neg = ""
         dtype = clip_model.transformer.get_cast_dtype()
-
         ctx_dim = clip_model.ln_final.weight.shape[0]
-
-        self.classnames = classnames
-
-        self.state_normal_list = [
-            "{}",
-        ]
-
-        self.state_anomaly_list = [
-            "{}",
-        ]
-
-        normal_num = len(self.state_normal_list)
-        anormaly_num = len(self.state_anomaly_list)
-        self.normal_num = normal_num
-        self.anormaly_num = anormaly_num
         self.num_query_tokens = Pparameters['num_query_tokens']
         self.width = Pparameters["width"]
         self.emb_dim = Pparameters["emb_dim"]
@@ -117,11 +97,11 @@ class FewVand_PromptLearner(nn.Module):
         ctx_vectors_neg = torch.empty(n_ctx_neg, ctx_dim, dtype=dtype)
         nn.init.normal_(ctx_vectors_pos, std=0.02)
         nn.init.normal_(ctx_vectors_neg, std=0.02)
-        prompts_pos = " ".join(["A"] * n_ctx_pos)+"."
-        prompts_neg = " ".join(["N"] * n_ctx_neg)+'.'
+        prompts_pos = " ".join(["X"] * n_ctx_pos)+"."
+        prompts_neg = " ".join(["X"] * n_ctx_neg)+'.'
 
-        self.ctx_pos = nn.Parameter(ctx_vectors_pos).to(device)  # to be optimized
-        self.ctx_neg = nn.Parameter(ctx_vectors_neg).to(device)  # to be optimized
+        self.ctx_pos = nn.Parameter(ctx_vectors_pos.to(device))  # to be optimized
+        self.ctx_neg = nn.Parameter(ctx_vectors_neg.to(device))  # to be optimized
 
         tokenized_prompts_pos = tokenize(prompts_pos).to(device)
         tokenized_prompts_neg = tokenize(prompts_neg).to(device)
@@ -144,9 +124,17 @@ class FewVand_PromptLearner(nn.Module):
     def forward(self, cls_id=None):
         ctx_pos = self.ctx_pos
         ctx_neg = self.ctx_neg
+        # # 判断是否为可训练参数
+        # is_trainable = ctx_pos.requires_grad
+        # print(f"参数是可训练的: {is_trainable}") # true
+
+        # is_trainable = ctx_neg.requires_grad
+        # print(f"参数是可训练的: {is_trainable}") # true
+
         # print("shape", self.ctx_pos[0:1].shape, ctx_pos.shape)
         prefix_pos = self.token_prefix_pos
         prefix_neg = self.token_prefix_neg
+
         suffix_pos = self.token_suffix_pos
         suffix_neg = self.token_suffix_neg
 
@@ -187,16 +175,18 @@ class FewVand_PromptLearner(nn.Module):
         return prompt, tokenized_prompt
 
     
-def encode_text_with_prompt_ensemble2(model, prompt_learner,objs=["objs"]):
-    text_prompts = {}
-    for idx, obj in enumerate(objs):
-        prompt, tokenized_prompt = prompt_learner(idx)
-        print("prompt",prompt.size(),tokenized_prompt.size())
-        # [2, 77, 768], [2, 77]
-        text_features = model.encode_text_learn(prompt, tokenized_prompt) # [2,768]
-        text_features = text_features.permute(1, 0)
-        text_prompts[obj] = text_features
-    if objs == ["objs"]:
-        return text_prompts["objs"]
-    else:
-        return text_prompts
+    def encode_text_with_prompt_ensemble2(self,model, prompt_learner,objs=["objs"]):
+        text_prompts = {}
+        # is_trainable = prompt_learner.ctx_pos.requires_grad
+        # print(f"参数是可训练的: {is_trainable}") # true
+        for idx, obj in enumerate(objs):
+            prompt, tokenized_prompt = prompt_learner(idx)
+            print("prompt",prompt.size(),tokenized_prompt.size())
+            # [2, 77, 768], [2, 77]
+            text_features = model.encode_text_learn(prompt, tokenized_prompt) # [2,768]
+            text_features = text_features.permute(1, 0)
+            text_prompts[obj] = text_features
+        if objs == ["objs"]:
+            return text_prompts["objs"]
+        else:
+            return text_prompts
