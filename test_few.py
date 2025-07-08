@@ -14,11 +14,14 @@ import torchvision.transforms as transforms
 from sklearn.metrics import auc, roc_auc_score, average_precision_score, f1_score, precision_recall_curve, pairwise
 from tqdm import tqdm
 
+
+import AnomalyCLIP_lib
 import open_clip
 from dataset import VisaDataset, MVTecDataset
 from metric import image_level_metrics
 from prompt_ensemble import FewVand_PromptLearner
 from few_shot import memory_pixel,attention,patch_attention
+from utils import get_transform
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -81,7 +84,10 @@ def test(args):
     txt_path = os.path.join(save_path, 'log_test_pixel_global.txt')
 
     # clip
-    model, _, preprocess = open_clip.create_model_and_transforms(args.model, img_size, pretrained=args.pretrained)
+    #model, _, preprocess = open_clip.create_model_and_transforms(args.model, img_size, pretrained=args.pretrained)
+    model,_ = AnomalyCLIP_lib.load("ViT-L/14@336px",device=device)
+    preprocess,transform = get_transform(args)
+    
     model.to(device)
 
     # logger
@@ -116,24 +122,21 @@ def test(args):
 
     # text prompt  
     with torch.cuda.amp.autocast(), torch.no_grad():
-        prompt_learner = FewVand_PromptLearner(model.to(device),n_ctx,device,Ppra)
+        prompt_learner = FewVand_PromptLearner(model.to("cpu"),Pparameters=Ppra)
     model.to(device)
+    prompt_learner.to(device)
     model.eval()
     ## 参数加载
     checkpoint = torch.load(args.checkpoint_path)
     prompt_learner.load_state_dict(checkpoint["prompt_learner"])
-    prompt, tokenized_prompt = prompt_learner()
-    text_features = model.encode_text_learn(prompt, tokenized_prompt)
-    text_features = text_features.permute(1, 0) # # [768, 2]
-    text_features = text_features/text_features.norm(dim=-1, keepdim=True)
 
-    query_tokens = prompt_learner.query_token ## query向量
+    #query_tokens = prompt_learner.query_token ## query向量
     # dataset
-    transform = transforms.Compose([
-            transforms.Resize((img_size, img_size)),
-            transforms.CenterCrop(img_size),
-            transforms.ToTensor()
-        ])
+    # transform = transforms.Compose([
+    #         transforms.Resize((img_size, img_size)),
+    #         transforms.CenterCrop(img_size),
+    #         transforms.ToTensor()
+    #     ])
 
     if dataset_name == 'mvtec':
         test_data = MVTecDataset(root=dataset_dir, transform=preprocess, target_transform=transform,
@@ -145,9 +148,9 @@ def test(args):
 
     # few shot
     ## get k-shot features of all cls names.
-    if args.mode == 'few_shot':    
-        mem_features = memory_pixel(args.model, model, obj_list, dataset_dir, save_path, preprocess, transform,
-                                            args.k_shot, dataset_name, device)
+    # if args.mode == 'few_shot':    
+    #     mem_features = memory_pixel(args.model, model, obj_list, dataset_dir, save_path, preprocess, transform,
+    #                                         args.k_shot, dataset_name, device)
     results = {}
     metrics = {}
     for obj in obj_list:
@@ -164,25 +167,35 @@ def test(args):
         cls_name = items['cls_name']
         results[cls_name[0]]['gt_sp'].extend(items['anomaly'].detach().cpu())
         with torch.no_grad():
-            image_features,  patch_features= model.encode_image(image, [24])
+            prompt_pos,prompt_neg,tokenized_prompt_pos,tokenized_prompt_neg = prompt_learner.forward(cls_id=None)
+            text_features_pos = model.encode_text_learn(prompt_pos, tokenized_prompt_pos).float()
+            text_features_neg = model.encode_text_learn(prompt_neg, tokenized_prompt_neg).float()
+            text_features = torch.cat([text_features_neg,text_features_pos])
+            text_features = torch.stack(torch.chunk(text_features,dim=0,chunks=2),dim=1)
+            text_features = text_features/text_features.norm(dim=-1, keepdim=True)
+            total_image_features = model.encode_image(image)
+            image_features,patch_features = total_image_features[:,0], total_image_features[:, 1:]
+
+            #image_features,  patch_features= model.encode_image(image, [24])
             image_features = image_features / image_features.norm(dim=-1, keepdim=True) #[1, dim]
-            patch_features = [p[:, 1:, :] for p in patch_features] # 第一个位置为cls
+            #patch_features = [p[:, 1:, :] for p in patch_features] # 第一个位置为cls
             ## text-image image_level score
-            text_probs = image_features @ text_features/0.07    
+            text_probs = image_features @ text_features.squeeze(0).T   
             text_probs = text_probs.softmax(-1)[:, 1] ####取为abnormal的概率
-
+            #text_probs = (text_probs/0.07).softmax(-1)
+            print("text_probs: ",text_probs)
             ## refer-score image-level
-            refer_feature= mem_features[cls_name[0]] #[k-shot, dim]
-            print("refer_feature: {}".format(refer_feature.size()))
-            print("qkv_dim_size:",query_tokens.size(),refer_feature.size(),patch_features[0].size())
-            attn_features = patch_attention(query_tokens,refer_feature.unsqueeze(0),patch_features[0])
-            attn_features = torch.mean(attn_features,dim=1)
-            attn_features = attn_features/attn_features.norm(dim=-1, keepdim=True) ###[batch_size,dim]
-            refer_score = prompt_learner.classfier(attn_features)
-            print("attn_features: {}".format(attn_features.size()))
-            refer_probs = refer_score.softmax(-1)[:, 1]
-            f_probs = (text_probs + refer_probs)/2. ####取为abnormal的概率
-
+            #refer_feature= mem_features[cls_name[0]] #[k-shot, dim]
+            #print("refer_feature: {}".format(refer_feature.size()))
+            #print("qkv_dim_size:",query_tokens.size(),refer_feature.size(),patch_features[0].size())
+            # attn_features = patch_attention(query_tokens,refer_feature.unsqueeze(0),patch_features[0])
+            # attn_features = torch.mean(attn_features,dim=1)
+            # attn_features = attn_features/attn_features.norm(dim=-1, keepdim=True) ###[batch_size,dim]
+            # refer_score = prompt_learner.classfier(attn_features)
+            # print("attn_features: {}".format(attn_features.size()))
+            #refer_probs = refer_score.softmax(-1)[:, 1]
+            #f_probs = (text_probs + refer_probs)/2. ####取为abnormal的概率
+            f_probs = text_probs
             results[cls_name[0]]['pr_sp'].extend(f_probs.detach().cpu())
 
     table_ls = []
