@@ -7,6 +7,7 @@ import json
 import argparse
 import wandb
 
+import AnomalyCLIP_lib
 from torch.utils.data import DataLoader
 from datetime import datetime
 from torch.nn import functional as F
@@ -16,7 +17,7 @@ import logging
 import torch
 import torch.nn as nn
 from loss import FocalLoss, BinaryDiceLoss
-
+from utils import get_transform
 #import open_clip.utils.misc as misc
 import open_clip
 from dataset import VisaDataset, MVTecDataset
@@ -31,7 +32,7 @@ from few_shot import memory_pixel,patch_attention
 
 from torch.utils.tensorboard import SummaryWriter
 
-writer = SummaryWriter(log_dir='./runs')  # 创建日志目录
+writer = SummaryWriter(log_dir='./anomlyclip_runs')  # 创建日志目录
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -64,10 +65,13 @@ def train(args):
         model_configs = json.load(f)
 
     # clip model  args.pretrained=openai   _, preprocess 就是处理数据的方式不一样
-    model, _, preprocess = open_clip.create_model_and_transforms(args.model, image_size, pretrained=args.pretrained)
+    #model, _, preprocess = open_clip.create_model_and_transforms(args.model, image_size, pretrained=args.pretrained)
+    AnomalyCLIP_parameters = {"Prompt_length": 10}
+    model,_ = AnomalyCLIP_lib.load("ViT-L/14@336px",device=device)
+    preprocess,transform = get_transform(args)
     print("model: {}".format(dir(model)))
     model.eval()
-    #tokenizer = open_clip.get_tokenizer(args.model)
+    #tokenizer = open_clip.get_tokenizer(args.model) ## 这里应该如何添加
 
     # logger
     root_logger = logging.getLogger()
@@ -90,11 +94,11 @@ def train(args):
         logger.info(f'{arg}: {getattr(args, arg)}')
 
     # transforms  这个模块主要是对图像做预处理  image size是一个超参数，应该如何去设定？
-    transform = transforms.Compose([
-        transforms.Resize((image_size, image_size)),
-        transforms.CenterCrop(image_size),
-        transforms.ToTensor()
-    ])
+    # transform = transforms.Compose([
+    #     transforms.Resize((image_size, image_size)),
+    #     transforms.CenterCrop(image_size),
+    #     transforms.ToTensor()
+    # ])
     
     # datasets
     if args.dataset == 'mvtec':
@@ -116,9 +120,9 @@ def train(args):
     Ppra = {"num_query_tokens":num_query_tokens,"width":width,"emb_dim":emb_dim}
     # learnable prompt  
     with torch.cuda.amp.autocast():
-        prompt_learner = FewVand_PromptLearner(model.to(device),n_ctx,device,Ppra)
-    
-    prompt, tokenized_prompt = prompt_learner()
+        #prompt_learner = FewVand_PromptLearner(model.to(device),n_ctx,device,Ppra)
+        prompt_learner = FewVand_PromptLearner(model.to("cpu"),Pparameters=Ppra)
+    #prompt, tokenized_prompt = prompt_learner()
 
     #print("text_features: {}".format(text_features.size())) # [768, 2]
     model.to(device)
@@ -136,18 +140,22 @@ def train(args):
     # linear layer
     ## 对attention 进行线性变换，输出二分类结果
     #trainable_layer = Classifier(model_configs['embed_dim'],2).to(device)
-    query_tokens = prompt_learner.query_token
+    #query_tokens = prompt_learner.query_token
     ## 这里的可训练参数为query token，prompt token + 最后的分类器
     optimizer = torch.optim.Adam(list(prompt_learner.parameters()), lr=learning_rate, betas=(0.5, 0.999))
 
-    model.eval()
+    model.eval() ## 
     prompt_learner.train()
     # 打印可训练的参数
     for name, param in prompt_learner.named_parameters():
         #print(name)
         if param.requires_grad:  # 仅打印可训练的参数
-            print(f"Parameter Name: {name}, Parameter Value: {param.data.size()}")
-
+            print(f"Prompt Parameter Name: {name}, Parameter Value: {param.data.size()}")
+    # 打印可训练的参数
+    # for name, param in model.named_parameters():
+    #     #print(name)
+    #     if param.requires_grad:  # 仅打印可训练的参数
+    #         print(f"model Parameter Name: {name}, Parameter Value: {param.data.size()}")
     # losses
     loss_focal = FocalLoss()
     loss_dice = BinaryDiceLoss()
@@ -163,80 +171,104 @@ def train(args):
             image = items['img'].to(device)
             cls_name = items['cls_name']  # 一个batch中对应的cls name
             with torch.amp.autocast(device_type="cuda"):
-                text_features = model.encode_text_learn(prompt, tokenized_prompt)
-                text_features = text_features.permute(1, 0) # # [768, 2]
+                prompt_pos,prompt_neg,tokenized_prompt_pos,tokenized_prompt_neg = prompt_learner.forward(cls_id=None)
+                text_features_pos = model.encode_text_learn(prompt_pos, tokenized_prompt_pos).float()
+                text_features_neg = model.encode_text_learn(prompt_neg, tokenized_prompt_neg).float()
+                text_features = torch.cat([text_features_neg,text_features_pos])
+                text_features = torch.stack(torch.chunk(text_features,dim=0,chunks=2),dim=1)
+                #text_features = model.encode_text_learn(prompt, tokenized_prompt)
+                #text_features = text_features.permute(1, 0) # # [768, 2]
                 with torch.no_grad():
                     ## 取最后一层的patch embedding
-                    image_features, patch_features = model.encode_image(image, features_list)
-                    print("patch_features: ",len(patch_features),patch_features[0].size())
+                    total_image_features = model.encode_image(image)
+                    image_features,patch_features = total_image_features[:,0], total_image_features[:, 1:]
+                    #image_features, patch_features = model.encode_image(image, features_list)
+                    #print("patch_features: ",len(patch_features),patch_features[0].size())
                     # few shot 得到reference image的特征
-                    mem_features = memory_pixel(args.model, model, cls_name, dataset_dir, save_path, preprocess, transform,
-                                            args.k_shot, dataset_name, device)
-                    ## refer_features: [batch_size,k-shot,emb_dim]
-                    refer_features = []
-                    for cls in cls_name:
-                        refer_features.append(mem_features[cls])
+                #     mem_features = memory_pixel(args.model, model, cls_name, dataset_dir, save_path, preprocess, transform,
+                #                             args.k_shot, dataset_name, device)
+                #     ## refer_features: [batch_size,k-shot,emb_dim]
+                #     refer_features = []
+                #     for cls in cls_name:
+                #         refer_features.append(mem_features[cls])
             
-                    refer_features = torch.stack(refer_features,dim=0) ##[batch,num_patch,emb_dim]
-                    ## 交叉注意力计算
-                    #attn_features = attention(query_tokens,refer_features_,image_features) image-level
-                if 'ViT' in args.model:
-                    patch_features = [p[:, 1:, :] for p in patch_features] # 第一个位置为cls
-                print("q,k,v: ",query_tokens.size(),refer_features.size(),patch_features[0].size()) 
-                # [batch,patch len, hidden dim]
-                attn_features = patch_attention(query_tokens,refer_features,patch_features[0]) #patch-level，最后一层
-                attn_features = torch.mean(attn_features,dim=1)
+                #     refer_features = torch.stack(refer_features,dim=0) ##[batch,num_patch,emb_dim]
+                #     ## 交叉注意力计算
+                #if 'ViT' in args.model:
+                #    patch_features = [p[:, 1:, :] for p in patch_features] # 第一个位置为cls
+                # #print("q,k,v: ",query_tokens.size(),refer_features.size(),patch_features[0].size()) 
+                # # [batch,patch len, hidden dim]
+                # attn_features = patch_attention(query_tokens,refer_features,patch_features[0]) #patch-level，最后一层
+                # attn_features = torch.mean(attn_features,dim=1)
                 # ## reference作为Key
                 label = items["anomaly"] 
                 image_features = image_features/image_features.norm(dim=-1, keepdim=True)  ###[batch_size,dim]
-                text_features = text_features/text_features.norm(dim=-1, keepdim=True)  ###[batch_size,2,dim]
-                attn_features = attn_features/attn_features.norm(dim=-1, keepdim=True) ###[batch_size,dim]
-                print(f"image_features dtype: {image_features.dtype}")
-                print(f"text_features dtype: {text_features.dtype}")
-                text_probs = image_features @ text_features/0.07
-                print("text_probs shape:", text_probs.shape)  # 在squeeze之前
-                print("squeezed text_probs shape:", text_probs.squeeze().shape)
-                print("label shape:", label.shape)
-
+                text_features = text_features/text_features.norm(dim=-1, keepdim=True)  ###[768, 2]
+                #attn_features = attn_features/attn_features.norm(dim=-1, keepdim=True) ###[batch_size,dim]
+                #print("image_features: {}".format(image_features.size()))
+                #print("text_features: {}".format(text_features.size()))
+                #print("image_features,text_features:",image_features.size(),text_features.size())
+                #text_probs = image_features @ text_features.squeeze(0).T # torch.Size([8, 2])
+                text_probs = image_features.unsqueeze(1) @ text_features.permute(0, 2, 1)
                 #print("text_probs: {}".format(text_probs.size())) #[8,2] normal的index为0，abnormal index为1
-                refer_probs =  prompt_learner.classfier(attn_features)
+                #refer_probs =  prompt_learner.classfier(attn_features)
 
-                anomaly_maps = []
-                #for idx in range(len(patch_features)):
-                    #print(patch_features[idx].size()) # [8, 1369, 1024]
-                normalized_patch = patch_features[0] / patch_features[0].norm(dim=-1, keepdim=True)
-                patch_feature = prompt_learner.image_proj(normalized_patch) 
-                anomaly_map = (100.0 * patch_feature @ text_features)
-                B, L, C = anomaly_map.shape
-                H = int(np.sqrt(L))
-                anomaly_map = F.interpolate(anomaly_map.permute(0, 2, 1).view(B, 2, H, H),
-                                            size=image_size, mode='bilinear', align_corners=True)
-                anomaly_map = torch.softmax(anomaly_map, dim=1)
-                anomaly_maps.append(anomaly_map)
-
-            image_loss = F.cross_entropy(text_probs, label.to(device))
-            reference_loss = F.cross_entropy(refer_probs, label.to(device))
+                # anomaly_maps = []
+                # #for idx in range(len(patch_features)):
+                #     #print(patch_features[idx].size()) # [8, 1369, 1024]
+                # normalized_patch = patch_features[0] / patch_features[0].norm(dim=-1, keepdim=True)
+                # patch_feature = prompt_learner.image_proj(normalized_patch)
+                # # torch.Size([8, 1369, 768]) torch.Size([1, 2, 768]
+                # #print("patch_feature,text_features: ",patch_feature.size(),text_features.size()) 
+                # anomaly_map = (100.0 * patch_feature @ text_features.squeeze(0).T)
+                # #print("anomaly_map: {}".format(anomaly_map.size())) #[8, 1369, 2]
+                # B, L, C = anomaly_map.shape
+                # H = int(np.sqrt(L))
+                # anomaly_map = F.interpolate(anomaly_map.permute(0, 2, 1).view(B, 2, H, H),
+                #                             size=image_size, mode='bilinear', align_corners=True)
+                # anomaly_map = torch.softmax(anomaly_map, dim=1)
+                # anomaly_maps.append(anomaly_map)
+            text_probs = text_probs[:, 0, ...]/0.07
+            print("text_probs:",text_probs.squeeze().size()) # torch.Size([8, 1370, 2])
+            image_loss = F.cross_entropy(text_probs.squeeze(), label.long().cuda())
+            #image_loss = F.cross_entropy(text_probs, label.long().to(device))
+            #reference_loss = F.cross_entropy(refer_probs, label.to(device))
             #loss = (image_loss + reference_loss)/2.
             
-            print("image_loss:{} ; reference_loss: {}".format(image_loss,reference_loss))
-            gt = items['img_mask'].squeeze().to(device)
-            gt[gt > 0.5], gt[gt <= 0.5] = 1, 0
-            loss = 0.
-            for i in range(len(anomaly_maps)):
-                loss += loss_focal(anomaly_maps[i], gt)
-                loss += loss_dice(anomaly_maps[i][:, 1, :, :], gt) 
-                loss += loss_dice(anomaly_maps[i][:, 0, :, :], 1-gt)
+            #print("image_loss:{} ; reference_loss: {}".format(image_loss,reference_loss))
+            print("image_loss:{}".format(image_loss))
+            
+            # gt = items['img_mask'].squeeze().to(device)
+            # gt[gt > 0.5], gt[gt <= 0.5] = 1, 0
+            # loss = 0.
+            # for i in range(len(anomaly_maps)):
+            #     loss += loss_focal(anomaly_maps[i], gt)
+            #     loss += loss_dice(anomaly_maps[i][:, 1, :, :], gt) 
+            #     loss += loss_dice(anomaly_maps[i][:, 0, :, :], 1-gt)
 
             optimizer.zero_grad()
-            (loss+image_loss+reference_loss).backward()
+            #(4*loss+image_loss+reference_loss).backward()
+            image_loss.backward()
+            #(loss+image_loss).backward()
+            # 打印所有参数梯度
+            for name, param in prompt_learner.named_parameters():
+                if param.requires_grad:
+                    print(
+                        f"Iter: {epoch}-{idxs} | Param: {name} | "
+                        f"Grad Shape: {param.grad.shape} | "
+                        f"Grad Norm: {param.grad.norm().item():.6f}"
+                    )
+        #CLIP_MODEL.param.requires_grad
+        #Iter: 0-1 | Param: positional_embedding | Grad Shape: torch.Size([77, 768]) | Grad Norm: 0.054360
+        #Iter: 0-1 | Param: text_projection 
             optimizer.step()
-            loss_list.append(loss.item())
+            loss_list.append(image_loss.item())
             # if idxs % 100 == 0:
             #     wandb.log({"map_loss": loss.item(), "image_loss": image_loss.item(),"reference_loss": reference_loss.item()}, step=epoch * len(train_dataloader) + idxs)
             if idxs % 100 == 0:
-                writer.add_scalar('map_loss', loss, epoch * len(train_dataloader) + idxs)  # 记录损失
-                writer.add_scalar('image_loss', image_loss, epoch * len(train_dataloader) + idxs)  # 记录损失
-                writer.add_scalar('reference_loss', reference_loss, epoch * len(train_dataloader) + idxs)  # 记录损失
+                #writer.add_scalar('map_loss', loss, epoch * len(train_dataloader) + idxs)  # 记录损失 1 – 1.5
+                writer.add_scalar('image_loss', image_loss, epoch * len(train_dataloader) + idxs)  # 记录损失 2-4
+                #writer.add_scalar('reference_loss', reference_loss, epoch * len(train_dataloader) + idxs)  # 记录损失 0.5-1
                 writer.flush()
         # logs
         if (epoch + 1) % args.print_freq == 0:
